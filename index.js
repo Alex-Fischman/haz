@@ -1,35 +1,13 @@
-const connection = new RTCPeerConnection();
-const channel = connection.createDataChannel("events");
-
-const keydown = event =>
-	channel.send({ time: Date.now(), key: event.key, pressed: true });
-const keyup = event =>
-	channel.send({ time: Date.now(), key: event.key, pressed: false })
-const mousedown = event =>
-	channel.send({ time: Date.now(), mouse: event.button, pressed: true });
-const mouseup = event =>
-	channel.send({ time: Date.now(), mouse: event.button, pressed: false });
-const mousemove = event =>
-	channel.send({ time: Date.now(), move: [event.movementX, event.movementY] });
-
-channel.addEventListener("open", event => {
-	console.log("channel opened!");
-	document.addEventListener("keydown", keydown);
-	document.addEventListener("keyup", keyup);
-	document.addEventListener("mousedown", mousedown);
-	document.addEventListener("mouseup", mouseup);
-	document.addEventListener("mousemove", mousemove);
-});
-channel.addEventListener("close", event => {
-	console.log("channel closed!");
-	document.removeEventListener("keydown", keydown);
-	document.removeEventListener("keyup", keyup);
-	document.removeEventListener("mousedown", mousedown);
-	document.removeEventListener("mouseup", mouseup);
-	document.removeEventListener("mousemove", mousemove);
-});
+const inputBindings = (bind, send) => {
+	bind("keydown", e => send({ time: Date.now(), key: e.code, pressed: true }));
+	bind("keyup", e => send({ time: Date.now(), key: e.code, pressed: false }));
+	bind("mousedown", e => send({ time: Date.now(), mouse: e.button, pressed: true }));
+	bind("mouseup", e => send({ time: Date.now(), mouse: e.button, pressed: false }));
+	bind("mousemove", e => send({ time: Date.now(), move: [e.movementX, e.movementY] }));
+};
 
 const events = [];
+inputBindings(document.addEventListener, event => events.push(event));
 
 const log = document.getElementById("log");
 const frame = () => {
@@ -53,23 +31,64 @@ const frame = () => {
 };
 window.requestAnimationFrame(frame);
 
-connection.addEventListener("icecandidate", event =>
-	console.log("ice", JSON.stringify(event.candidate))) // TODO
+const CHANNEL_LABEL = "events";
+const connect = (
+	remoteDescription,
+	onChannelOpened,
+	onMessageReceived,
+) => {
+	const connection = new RTCPeerConnection();
+	let channel;
 
-const hostBroadcast = () => connection
-	.createOffer()
-	.then(offer => connection.setLocalDescription(offer))
-	.then(() => console.log(JSON.stringify(connection.localDescription)));
+	const createOffer = async () => {
+		const offer = await connection.createOffer();
+		connection.setLocalDescription(offer);
+	};
 
-const clientBounce = hostDescription => connection
-	.setRemoteDescription(hostDescription)
-	.then(() => connection.addEventListener("datachannel", event =>
-		event.channel.addEventListener("message", event =>
-			events.push(event.data))))
-	.then(() => connection.createAnswer())
-	.then(answer => connection.setLocalDescription(answer))
-	.then(() => console.log(JSON.stringify(connection.localDescription)));
+	const createAnswer = async offer => {
+		await connection.setRemoteDescription(JSON.parse(offer));
+		const answer = await connection.createAnswer();
+		connection.setLocalDescription(answer);
+	};
 
-const hostAccept = clientDescription => connection
-	.setRemoteDescription(clientDescription)
-	.then(() => console.log("connected"));
+	const setAnswer = answer => connection.setRemoteDescription(JSON.parse(answer));
+
+	const setUpChannelAsAHost = () => {
+		channel = connection.createDataChannel(CHANNEL_LABEL);
+		channel.addEventListener("open", onChannelOpened);
+		channel.addEventListener("message", e => onMessageReceived(e.data));
+	};
+
+	const setUpChannelAsAClient = () => {
+		connection.addEventListener("datachannel", e => {
+			channel = e.channel;
+			channel.addEventListener("open", onChannelOpened);
+			channel.addEventListener("message", e => onMessageReceived(e.data));
+		});
+	};
+
+	const sendMessage = message => {
+		if (channel) channel.send(message);
+	};
+
+	return new Promise(callback => {
+		connection.addEventListener("icecandidate", e => {
+			if (e.candidate === null && connection.localDescription) {
+				connection.localDescription.sdp.replace("b=AS:30", "b=AS:1638400"); // TODO: ??
+				callback({
+					localDescription: JSON.stringify(connection.localDescription),
+					setAnswer,
+					sendMessage,
+				});
+			}
+		});
+
+		if (!remoteDescription) {
+			setUpChannelAsAHost();
+			createOffer();
+		} else {
+			setUpChannelAsAClient();
+			createAnswer(remoteDescription);
+		}
+	});
+};

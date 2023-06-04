@@ -9,7 +9,10 @@ const inputBindings = (bind, send) => {
 };
 
 const channelBindings = channel => {
-	const send = message => channel.send(JSON.stringify(message));
+	const send = message => {
+		events.push(message);
+		channel.send(JSON.stringify(message));
+	};
 	channel.addEventListener("message", e => events.push(JSON.parse(e.data)));
 
 	channel.addEventListener("open", () => inputBindings(document.addEventListener, send));

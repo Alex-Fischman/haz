@@ -1,24 +1,5 @@
 const events = [];
 
-const inputBindings = (bind, send) => {
-	bind("keydown", e => send({ time: Date.now(), key: e.code, pressed: true }));
-	bind("keyup", e => send({ time: Date.now(), key: e.code, pressed: false }));
-	bind("mousedown", e => send({ time: Date.now(), mouse: e.button, pressed: true }));
-	bind("mouseup", e => send({ time: Date.now(), mouse: e.button, pressed: false }));
-	bind("mousemove", e => send({ time: Date.now(), move: [e.movementX, e.movementY] }));
-};
-
-const channelBindings = channel => {
-	const send = message => {
-		events.push(message);
-		channel.send(JSON.stringify(message));
-	};
-	channel.addEventListener("message", e => events.push(JSON.parse(e.data)));
-
-	channel.addEventListener("open", () => inputBindings(document.addEventListener, send));
-	channel.addEventListener("close", () => inputBindings(document.removeEventListener, send));
-};
-
 const log = document.getElementById("log");
 const frame = () => {
 	const now = Date.now();
@@ -41,12 +22,17 @@ const frame = () => {
 };
 window.requestAnimationFrame(frame);
 
-const CHANNEL_LABEL = "events";
-
-const connection = new RTCPeerConnection();
+let client;
+const inputBindings = (bind, send) => {
+	bind("keydown", e =>   send({ time: Date.now(), client, key: e.code, pressed: true }));
+	bind("keyup", e =>     send({ time: Date.now(), client, key: e.code, pressed: false }));
+	bind("mousedown", e => send({ time: Date.now(), client, mouse: e.button, pressed: true }));
+	bind("mouseup", e =>   send({ time: Date.now(), client, mouse: e.button, pressed: false }));
+	bind("mousemove", e => send({ time: Date.now(), client, move: [e.movementX, e.movementY] }));
+};
 
 // this promise waits for the ICE negotiation to finish before returning the local description
-const waitForIce = new Promise(callback => {
+const waitForIce = connection => new Promise(callback => {
 	connection.addEventListener("icecandidate", e => {
 		if (e.candidate === null && connection.localDescription) {
 			callback(JSON.stringify(connection.localDescription));
@@ -54,18 +40,51 @@ const waitForIce = new Promise(callback => {
 	});
 });
 
-const hostBroadcast = async () => {
-	channelBindings(connection.createDataChannel(CHANNEL_LABEL));
+const server = {};
 
-	await connection.setLocalDescription(await connection.createOffer());
-	return waitForIce;
+const createServer = async clients => {
+	server.connections = [];
+	server.channels = [];
+	for (let i = 0; i < clients; i++) {
+		const connection = new RTCPeerConnection();
+		const channel = connection.createDataChannel("events");
+		channel.addEventListener("message", e => {
+			for (const channel of server.channels)
+				if (channel.readyState === "open") channel.send(e.data);
+		});
+		
+		server.connections.push(connection);
+		server.channels.push(channel);
+	}
+
+	for (let i = 0; i < clients; i++) {
+		const connection = server.connections[i];
+		await connection.setLocalDescription(await connection.createOffer());
+		if (i === 0) {
+			const answer = await createClient(await waitForIce(connection), i);
+			await serverAccept(answer, i);
+		} else {
+			console.log("offer for client " + i);
+			console.log(JSON.stringify(await waitForIce(connection)));
+		}
+	}
 };
 
-const clientBounce = async offer => {
-	connection.addEventListener("datachannel", e => channelBindings(e.channel));
+const createClient = async (offer, i) => {
+	client = i;
+	const connection = new RTCPeerConnection();
+	connection.addEventListener("datachannel", e => {
+		const c = e.channel;
+		c.addEventListener("message", e => events.push(JSON.parse(e.data)));
+		const send = message => c.send(JSON.stringify(message));
+		c.addEventListener("open", () => inputBindings(document.addEventListener, send));
+		c.addEventListener("close", () => inputBindings(document.removeEventListener, send));
+	});
 	await connection.setRemoteDescription(JSON.parse(offer));
 	await connection.setLocalDescription(await connection.createAnswer());
-	return waitForIce;
+	return await waitForIce(connection);
 };
 
-const hostReceive = answer => connection.setRemoteDescription(JSON.parse(answer));
+const serverAccept = async (answer, i) => {
+	await server.connections[i].setRemoteDescription(JSON.parse(answer));
+};

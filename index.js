@@ -35,43 +35,45 @@ const inputBindings = (bind, send) => {
 const waitForIce = connection => new Promise(callback => {
 	connection.addEventListener("icecandidate", e => {
 		if (e.candidate === null && connection.localDescription) {
-			callback(JSON.stringify(connection.localDescription));
+			callback(connection.localDescription);
 		}
 	});
 });
 
-const server = {};
+const server = { connections: [], channels: [] };
 
-const createServer = async clients => {
-	server.connections = [];
-	server.channels = [];
-	for (let i = 0; i < clients; i++) {
-		const connection = new RTCPeerConnection();
-		const channel = connection.createDataChannel("events");
-		channel.addEventListener("message", e => {
-			for (const channel of server.channels)
-				if (channel.readyState === "open") channel.send(e.data);
-		});
-		
-		server.connections.push(connection);
-		server.channels.push(channel);
-	}
+// creates the local client for the hosting player
+const createServer = async () => await serverConnect(await createClient(await serverAddClient()));
 
-	for (let i = 0; i < clients; i++) {
-		const connection = server.connections[i];
-		await connection.setLocalDescription(await connection.createOffer());
-		if (i === 0) {
-			const answer = await createClient(await waitForIce(connection), i);
-			await serverAccept(answer, i);
-		} else {
-			console.log("offer for client " + i);
-			console.log(JSON.stringify(await waitForIce(connection)));
-		}
-	}
+// creates a connection object and sets it up
+const serverAddClient = async () => {
+	const connection = new RTCPeerConnection();
+	const channel = connection.createDataChannel("events");
+	channel.addEventListener("message", e => {
+		for (const channel of server.channels)
+			if (channel.readyState === "open") channel.send(e.data);
+	});	
+	await connection.setLocalDescription(await connection.createOffer());
+	const offer = { type: "offer", client: server.connections.length };
+	offer.sdp = (await waitForIce(connection)).sdp
+	server.connections.push(connection);
+	server.channels.push(channel);
+	return JSON.stringify(offer);
 };
 
-const createClient = async (offer, i) => {
-	client = i;
+// closes a specified connection object
+const serverRemoveClient = client => server.connections[client].close();
+
+// takes an answer from a client and matches it to the right connection object
+const serverConnect = async string => {
+	const answer = JSON.parse(string);
+	await server.connections[answer.client].setRemoteDescription(answer);
+};
+
+// takes an offer from one of the server's connection objects and returns an answer
+const createClient = async string => {
+	const offer = JSON.parse(string);
+	client = offer.client;
 	const connection = new RTCPeerConnection();
 	connection.addEventListener("datachannel", e => {
 		const c = e.channel;
@@ -80,11 +82,7 @@ const createClient = async (offer, i) => {
 		c.addEventListener("open", () => inputBindings(document.addEventListener, send));
 		c.addEventListener("close", () => inputBindings(document.removeEventListener, send));
 	});
-	await connection.setRemoteDescription(JSON.parse(offer));
+	await connection.setRemoteDescription(offer);
 	await connection.setLocalDescription(await connection.createAnswer());
-	return await waitForIce(connection);
-};
-
-const serverAccept = async (answer, i) => {
-	await server.connections[i].setRemoteDescription(JSON.parse(answer));
+	return JSON.stringify({ type: "answer", client, sdp: (await waitForIce(connection)).sdp });
 };
